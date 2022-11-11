@@ -2,7 +2,7 @@
 {% block body %}
 <div class="main-panel">
     <div class="content-wrapper">
-      <div class="row">
+      <div class="row grid-margin">
         <div class="col-sm-12">
           <div class="home-tab">
             <div class="d-sm-flex align-items-center justify-content-between border-bottom">
@@ -13,7 +13,7 @@
                 <div class="btn-wrapper">
                   <a href="{{url_for('specificStoragedownloadResults')}}" class="btn btn-outline-dark"><i class="icon-download"></i>Results</a>
                   <a href="{{url_for('deleteLogs', name='StorageAccounts')}}" class="btn btn-danger  text-white me-0"><i class="icon-download"></i>Delete Logs</a>
-                  {% if status == "False" or status == None %}
+                  {% if status.storageAccounts == "False" or status.storageAccounts == None %}
                   <a href="{{url_for('specificStorageAttack', action='start')}}" class="btn btn-primary text-white me-0"><i class="menu-icon mdi mdi-search-web"></i> Start Searching</a>
                   {% else %}
                   <a href="{{url_for('specificStorageAttack', action='stop')}}" class="btn btn-danger text-white me-0"><i class="menu-icon mdi mdi-stop"></i> Stop Searching</a>
@@ -80,9 +80,7 @@
                         <h3 class="card-title text-success">Storage enumeration Logs</h3>
 
                         <div id="display_log" class="text-warning " style="position: absolute;">
-                          {% for log in logs %}
-                           {{ log.message | safe }}
-                        {% endfor %}
+                       
                         </div>                              
                       </div>
                     </div>
@@ -127,5 +125,25 @@
       </div>
     </div>
   </div>
+  
+
+  <script src="{{ url_for('static',filename='js/jquery-3.2.1.min.js') }}"></script>
+  <script src="{{ url_for('static',filename='js/socket.io.min.js') }}"></script>
+
+  <script type="text/javascript" charset="utf-8">
+      var socket;
+      $(document).ready(function(){
+          socket = io.connect('http://' + document.domain + ':' + location.port + '/logs');
+          socket.on('connect', function() {
+              socket.emit('joined', {});
+          });
+          socket.on('message', function(data) {
+              $("#display_log").html("<pre>"+data.msg+"</pre>");
+          });
+          socket.emit('logging', {'type': 'specificAttackStorageLog'});
+      });
+
+  </script>
+
 {% endblock %}
 

